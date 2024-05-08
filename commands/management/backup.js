@@ -15,7 +15,15 @@ module.exports = {
                     option.setName('state').setDescription('The state to backup to (Default is latest).').setRequired(false))
 
         )
-        
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('schedule').setDescription('Schedules a backup of the server settings.')
+                .addStringOption(option =>
+                    option.setName('time').setDescription('The time to schedule the backup at (1D, 1M, 1W, 1MO).').setRequired(true))
+                
+                .addStringOption(option =>
+                    option.setName('state').setDescription('The state to backup to (Default is latest).').setRequired(false))
+        )
         .addSubcommand(subcommand =>
             subcommand
                 .setName('list')
@@ -48,7 +56,7 @@ module.exports = {
                 const existingBackup = await BackupSchema.findOne({ guildId: interaction.guild.id, state: interaction.options.getString('state') || 'latest' });
                 const serverInfo = new EmbedBuilder()
                     .setTitle('Server Backup')
-                    .setDescription(`Created Backup: ${interaction.options.getString('state') || 'latest'}\n\n\u200b<:arrow:1227071946672574504> **Channels Stored:** ${interaction.guild.channels.cache.filter(channel => channel.type !== ChannelType.GuildCategory && channel.id !== interaction.guild.rulesChannelId && channel.id !== interaction.guild.publicUpdatesChannelId && channel.id !== interaction.guild.systemChannelId).size}\n<:arrow:1227071946672574504> **Roles Stored:** ${interaction.guild.roles.cache.filter(role => !role.managed && role.name !== '@everyone' && !role.permissions.has(PermissionsBitField.Flags.Administrator)).size}\n<:arrow:1227071946672574504> **Categories Stored:** ${interaction.guild.channels.cache.filter(channel => channel.type === ChannelType.GuildCategory).size}\n<:arrow:1227071946672574504> **Forum Channels Stored:** ${interaction.guild.channels.cache.filter(channel => channel.type === ChannelType.GuildForum).size}\n<:arrow:1227071946672574504>**Server Name: ** ${interaction.guild.name}\n<:curve:1227071949100810331>**Server Owner:** <@${interaction.guild.ownerId}>\n<:curve:1227071949100810331>**Server ID:** ${interaction.guild.id}\n\u200b`) 
+                    .setDescription(`Created Backup: ${interaction.options.getString('state') || 'latest'}\n\n\u200b<:arrow:1227071946672574504> **Channels Stored:** ${interaction.guild.channels.cache.filter(channel => channel.type !== ChannelType.GuildCategory && channel.id !== interaction.guild.rulesChannelId && channel.id !== interaction.guild.publicUpdatesChannelId && channel.id !== interaction.guild.systemChannelId).size}\n<:arrow:1227071946672574504> **Roles Stored:** ${interaction.guild.roles.cache.filter(role => !role.managed && role.name !== '@everyone' && !role.permissions.has(PermissionsBitField.Flags.Administrator)).size}\n<:arrow:1227071946672574504> **Categories Stored:** ${interaction.guild.channels.cache.filter(channel => channel.type === ChannelType.GuildCategory).size}\n<:arrow:1227071946672574504> **Forum Channels Stored:** ${interaction.guild.channels.cache.filter(channel => channel.type === ChannelType.GuildForum).size}\n<:arrow:1227071946672574504>**Server Name: ** ${interaction.guild.name}\n<:curve:1227071949100810331>**Server Owner:** <@${interaction.guild.name}>\n<:curve:1227071949100810331>**Server ID:** ${interaction.guild.id}\n\u200b`) 
                     .setColor('#80b918')
                     .setTimestamp();
 
@@ -75,7 +83,7 @@ module.exports = {
                 }
 
 
-                await interaction.reply({ content: 'Server backup created successfully!', embeds:[serverInfo], ephemeral: false });
+                await interaction.reply({ content: 'Server backup created successfully!', embeds:[serverInfo], ephemeral: true });
                      
 
             } else if (interaction.options.getSubcommand() === 'restore') {
@@ -90,16 +98,13 @@ module.exports = {
                 try {
                     const serverData = JSON.parse(backup.data);
                     // Delete roles, channels, cats which can be deleted
-                    for (const channel of interaction.guild.channels.cache.filter(channel => channel.type !== ChannelType.GuildCategory && channel.id !== interaction.guild.rulesChannelId && channel.id !== interaction.guild.publicUpdatesChannelId && channel.id !== interaction.guild.systemChannelId).values()) {
+                    for (const channel of interaction.guild.channels.cache.filter(channel => channel.id !== interaction.guild.rulesChannelId && channel.id !== interaction.guild.publicUpdatesChannelId && channel.id !== interaction.guild.systemChannelId).values()) {
                         await channel.delete();
                     }
 
                     for (const role of interaction.guild.roles.cache.filter(role => !role.managed && role.name !== '@everyone' && !role.permissions.has(PermissionsBitField.Flags.Administrator)).values()) {
                         await role.delete();
                     }
-
-
-
 
                    
                     
@@ -170,16 +175,80 @@ module.exports = {
                         await role.setPosition(roleData.position);
                     }
             
-                    await interaction.followUp({ content: 'Backup restored successfully.', ephemeral: false });
+                    await interaction.followUp({ content: 'Backup restored successfully.', ephemeral: true });
                 } catch (error) {
                     console.error('Error restoring backup:', error);
                     await interaction.followUp({ content: 'An error occurred while restoring the backup.', ephemeral: true });
                 }
             }
-             else if (interaction.options.getSubcommand() === 'list') {
+             else if (interaction.options.getSubcommand() === 'schedule') {
+                await interaction.deferReply({ ephemeral: true });
+
+            
+                if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageChannels) && !interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild) && interaction.member.id !== interaction.guild.ownerId) {
+                    return interaction.reply({ content: 'You must have the `Manage Channels` or `Manage Server` permission to use this command.', ephemeral: true });
+                }
+
+                const isEnabled = interaction.options.getBoolean('isEnabled');
+
+                if (isEnabled) {
+                    const state = interaction.options.getString('state') || 'latest';
+                    const time = interaction.options.getString('time');
+                    const interval = getTime(time);
+
+                    const guildBackups = await BackupSchema.find({ guildId: interaction.guild.id });
+
+                    const createBackupAndScheduleNext = async () => {
+                        try {
+                            if (!isBackupSchedulingEnabled) return;
+
+                            if (guildBackups.length >= maxStates) {
+                                const latestBackupIndex = guildBackups.findIndex(backup => backup.state === 'latest');
+                                const backupsToDelete = guildBackups.filter((backup, index) => index !== latestBackupIndex).slice(0, guildBackups.length - maxStates + 1);
+                    
+                                for (const backupToDelete of backupsToDelete) {
+                                    await BackupSchema.findByIdAndDelete(backupToDelete._id);
+                                }
+                            } 
+                            const serverDataString = await createBackupData(interaction);
+
+                            await BackupSchema.findOneAndUpdate({ guildId: interaction.guild.id, state }, { data: serverDataString, scheduledTime: new Date() }, { upsert: true });
+
+                            setTimeout(createBackupAndScheduleNext, interval);
+                        } catch (error) {
+                            console.error('Error creating backup:', error);
+                            await interaction.reply({ content: 'An error occurred while scheduling the backup.', ephemeral: true });
+                        }
+                    };
+
+                    createBackupAndScheduleNext();
+
+                    const embed = new EmbedBuilder()
+                        .setTitle('Backup Schedule')
+                        .setDescription(`Server scheduled backup has been enabled and will run every ${time}.`)
+                        .setColor('#80b918')
+                        .setTimestamp();
+
+                    await interaction.followUp({ embeds: [embed], ephemeral: true });
+                } else {
+                    const guildBackups = await BackupSchema.find({ guildId: interaction.guild.id, state: interaction.options.getString('state') || 'latest' }).enabled;
+                    guildBackups.enabled = false;
+                    await guildBackups.save();
+                    const embed = new EmbedBuilder()
+                        .setTitle('Backup Schedule')
+                        .setDescription(`Server scheduled backup has been disabled.`)
+                        .setColor('#80b918')
+                        .setTimestamp();
+                    await interaction.followUp({ embeds: [embed], ephemeral: true });
+                    
+                }
+
+ 
+            } else if (interaction.options.getSubcommand() === 'list') {
                 const state = interaction.options.getString('state') || 'latest';
 
                 const guildBackups = await BackupSchema.findOne({ guildId: interaction.guild.id, state });
+                console.log(guildBackups);
 
                 if (!guildBackups) {
                     return interaction.reply({ content: 'No backups found.', ephemeral: true });
@@ -205,7 +274,7 @@ module.exports = {
                     .setThumbnail(interaction.guild.iconURL({ dynamic: true }));
                     
 
-                await interaction.reply({ embeds: [embed], ephemeral: false });
+                await interaction.reply({ embeds: [embed], ephemeral: true });
 
            
             }
@@ -330,6 +399,7 @@ async function createBackupData(interaction) {
                 position: role.rawPosition
             }))
     };
+    console.log(JSON.stringify(serverData.forumChannels))
 
     return JSON.stringify(serverData);
 }
